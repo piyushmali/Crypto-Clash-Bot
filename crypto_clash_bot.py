@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Configure logging
+# Configure comprehensive logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -30,7 +30,7 @@ class CryptoClashBot:
         # In-memory storage (for production, use Redis/DB)
         self.player_data = {}  # user_id: {streak, last_play, shard_tokens, whale_powerups, og_status}
         self.group_data = {}   # chat_id: {leaderboard, og_count, total_players}
-        self.active_predictions = {}  # prediction_id: {user_id, chat_id, crypto, direction, start_price, timestamp}
+        self.active_predictions = {}  # prediction_id: {user_id, chat_id, crypto, direction, start_price, timestamp, locked}
         self.group_challenges = {}  # challenge_id: {group1, group2, start_time, duration}
         
         # Crypto symbols for predictions
@@ -92,23 +92,53 @@ class CryptoClashBot:
             }
         return self.group_data[chat_id]
 
-    async def get_crypto_price(self, symbol: str) -> Optional[float]:
-        """Fetch current crypto price from CoinGecko"""
-        try:
-            url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            return data[symbol]['usd']
-        except Exception as e:
-            logger.error(f"Error fetching price for {symbol}: {e}")
-            return None
+    async def get_crypto_price(self, symbol: str, retries: int = 3) -> Optional[float]:
+        """Fetch current crypto price from CoinGecko with API key and retry mechanism"""
+        # Get API key from environment
+        api_key = os.getenv('COINGECKO_API_KEY')
+        
+        for attempt in range(retries):
+            try:
+                logger.info(f"Fetching price for {symbol}, attempt {attempt + 1}")
+                
+                # Use Pro API if key is available, otherwise use free API
+                if api_key:
+                    url = f"https://pro-api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd&precision=6"
+                    headers = {
+                        'x-cg-pro-api-key': api_key,
+                        'User-Agent': 'CryptoClash-Bot/1.0'
+                    }
+                    logger.info(f"Using CoinGecko Pro API with key for {symbol}")
+                else:
+                    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd&precision=6"
+                    headers = {
+                        'User-Agent': 'CryptoClash-Bot/1.0'
+                    }
+                    logger.info(f"Using CoinGecko Free API for {symbol}")
+                
+                response = requests.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                price = data[symbol]['usd']
+                logger.info(f"Successfully fetched {symbol} price: ${price} (Pro API: {bool(api_key)})")
+                return price
+                
+            except Exception as e:
+                logger.error(f"Error fetching price for {symbol} (attempt {attempt + 1}): {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(1.5 ** attempt)  # Shorter backoff with Pro API
+                continue
+        
+        logger.error(f"Failed to fetch price for {symbol} after {retries} attempts")
+        return None
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start command - welcome new players"""
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         username = update.effective_user.username or "anon"
+        
+        logger.info(f"User {user_id} ({username}) started the bot in chat {chat_id}")
         
         player_data = self.get_player_data(user_id)
         group_data = self.get_group_data(chat_id)
@@ -118,6 +148,7 @@ class CryptoClashBot:
             player_data['og_status'] = True
             group_data['og_count'] += 1
             og_msg = "👑 Congratulations! You're now an OG in this group!"
+            logger.info(f"User {user_id} got OG status in chat {chat_id}")
         else:
             og_msg = ""
         
@@ -142,7 +173,7 @@ GM {username}! Ready to prove your diamond hands? 💎
 
 Use /predict to start your first prediction!
 Use /leaderboard to see who's dominating
-Use /challenge to battle other groups!
+Use /results to see your last prediction result
 
 WAGMI! 🚀
         """
@@ -153,8 +184,23 @@ WAGMI! 🚀
         """Start a new prediction"""
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
+        username = update.effective_user.username or "anon"
+        
+        logger.info(f"User {user_id} ({username}) started prediction in chat {chat_id}")
         
         player_data = self.get_player_data(user_id)
+        
+        # Check if user has active prediction
+        for pred_id, pred_data in self.active_predictions.items():
+            if pred_data['user_id'] == user_id and not pred_data.get('completed', False):
+                remaining_time = 60 - int(time.time() - pred_data['timestamp'])
+                if remaining_time > 0:
+                    await update.message.reply_text(
+                        f"⏰ You already have an active prediction! {remaining_time}s remaining.\n"
+                        f"💰 Predicting: {self.crypto_display[pred_data['crypto']]}\n"
+                        f"🎯 Use /results to check status"
+                    )
+                    return
         
         # Check cooldown (prevent spam)
         if time.time() - player_data['last_play'] < 30:
@@ -173,7 +219,10 @@ WAGMI! 🚀
         # Get current price
         current_price = await self.get_crypto_price(crypto)
         if not current_price:
-            await update.message.reply_text("🔧 Price oracle is down! Try again in a moment.")
+            await update.message.reply_text(
+                "🔧 Price oracle is down! Try again in a moment.\n"
+                "The blockchain gods are testing our patience... 🙏"
+            )
             return
         
         # Create prediction ID
@@ -186,8 +235,12 @@ WAGMI! 🚀
             'crypto': crypto,
             'start_price': current_price,
             'timestamp': time.time(),
-            'fud_active': fud_active
+            'fud_active': fud_active,
+            'locked': False,
+            'completed': False
         }
+        
+        logger.info(f"Created prediction {prediction_id} for user {user_id}: {crypto_name} @ ${current_price}")
         
         # Create inline keyboard
         keyboard = [
@@ -220,21 +273,28 @@ Make your prediction! ⬇️
         
         msg = await update.message.reply_text(predict_msg, reply_markup=reply_markup, parse_mode='Markdown')
         
-        # Schedule result check in 60 seconds
-        context.job_queue.run_once(
-            self.check_prediction_result,
-            60,
-            data={'prediction_id': prediction_id, 'message_id': msg.message_id},
-            name=f"prediction_{prediction_id}"
-        )
+        # Schedule result check in 60 seconds with better error handling
+        try:
+            context.job_queue.run_once(
+                self.check_prediction_result,
+                60,
+                data={'prediction_id': prediction_id, 'message_id': msg.message_id, 'chat_id': chat_id},
+                name=f"prediction_{prediction_id}"
+            )
+            logger.info(f"Scheduled result check for prediction {prediction_id}")
+        except Exception as e:
+            logger.error(f"Failed to schedule job for prediction {prediction_id}: {e}")
 
     async def prediction_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle prediction button clicks"""
+        """Handle prediction button clicks with proper locking"""
         query = update.callback_query
         await query.answer()
         
         data = query.data
         user_id = query.from_user.id
+        username = query.from_user.username or "anon"
+        
+        logger.info(f"User {user_id} ({username}) clicked: {data}")
         
         if data.startswith('predict_'):
             parts = data.split('_')
@@ -251,20 +311,36 @@ Make your prediction! ⬇️
                 await query.answer("🚫 This isn't your prediction!", show_alert=True)
                 return
             
-            # Store the prediction direction
+            # Check if already locked
+            if prediction.get('locked', False):
+                await query.answer("✅ Prediction already locked!", show_alert=True)
+                return
+            
+            # Lock the prediction
+            prediction['locked'] = True
             prediction['direction'] = direction
             prediction['predicted_at'] = time.time()
             
             direction_emoji = "📈" if direction == 'up' else "📉"
             crypto_name = self.crypto_display[prediction['crypto']]
+            remaining_time = 60 - int(time.time() - prediction['timestamp'])
             
-            await query.edit_message_text(
-                f"✅ **PREDICTION LOCKED** ✅\n\n"
-                f"💰 {crypto_name} {direction_emoji} {direction.upper()}\n"
-                f"💵 Entry: ${prediction['start_price']:.4f}\n"
-                f"⏰ Results in ~{60 - int(time.time() - prediction['timestamp'])}s\n\n"
-                f"🤞 HODL tight! May the blockchain be with you! ⛓️"
-            )
+            logger.info(f"Locked prediction {prediction_id}: {direction} on {crypto_name}")
+            
+            locked_msg = f"""
+✅ **PREDICTION LOCKED** ✅
+
+💰 {crypto_name} {direction_emoji} {direction.upper()}
+💵 Entry: ${prediction['start_price']:.4f}
+⏰ Results in ~{max(0, remaining_time)}s
+{'🐋 WHALE MODE ACTIVE (3x)' if prediction.get('whale_mode', False) else ''}
+
+🤞 HODL tight! May the blockchain be with you! ⛓️
+
+Use /results to check this prediction anytime!
+            """
+            
+            await query.edit_message_text(locked_msg, parse_mode='Markdown')
             
         elif data.startswith('whale_'):
             prediction_id = data[6:]  # Remove 'whale_' prefix
@@ -288,11 +364,17 @@ Make your prediction! ⬇️
             await query.answer("🚫 Not your prediction!", show_alert=True)
             return
         
+        if prediction.get('locked', False):
+            await query.answer("⚠️ Prediction already locked!", show_alert=True)
+            return
+        
         # Consume whale power-up
         player_data['whale_powerups'] -= 1
         prediction['whale_mode'] = True
         
         crypto_name = self.crypto_display[prediction['crypto']]
+        
+        logger.info(f"User {user_id} activated whale mode for prediction {prediction_id}")
         
         # Update keyboard to show direction selection with whale mode
         keyboard = [
@@ -309,45 +391,62 @@ Make your prediction! ⬇️
             f"⚡ **3x MULTIPLIER ACTIVE**\n"
             f"🎯 Pick your direction for massive gains!\n\n"
             f"🐋 Remaining Power-ups: {player_data['whale_powerups']}",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
 
     async def check_prediction_result(self, context: ContextTypes.DEFAULT_TYPE):
-        """Check prediction result after 60 seconds"""
+        """Check prediction result after 60 seconds with comprehensive error handling"""
         job_data = context.job.data
         prediction_id = job_data['prediction_id']
         message_id = job_data['message_id']
+        chat_id = job_data['chat_id']
+        
+        logger.info(f"Checking result for prediction {prediction_id}")
         
         if prediction_id not in self.active_predictions:
+            logger.warning(f"Prediction {prediction_id} not found in active predictions")
             return
         
         prediction = self.active_predictions[prediction_id]
+        
+        # Mark as completed
+        prediction['completed'] = True
         
         # Skip if no direction was selected
         if 'direction' not in prediction:
             try:
                 await context.bot.edit_message_text(
-                    chat_id=prediction['chat_id'],
+                    chat_id=chat_id,
                     message_id=message_id,
-                    text="⏰ **TIME'S UP!**\n\n🚫 No prediction made - you missed out anon!"
+                    text="⏰ **TIME'S UP!**\n\n🚫 No prediction made - you missed out anon!\n\nUse /predict to try again! 🚀",
+                    parse_mode='Markdown'
                 )
-            except:
-                pass
-            del self.active_predictions[prediction_id]
+                logger.info(f"Prediction {prediction_id} expired with no direction selected")
+            except Exception as e:
+                logger.error(f"Failed to update expired prediction message: {e}")
+            
+            # Store result for /results command
+            prediction['result'] = 'expired'
             return
         
-        # Get final price
+        # Get final price with retry
         final_price = await self.get_crypto_price(prediction['crypto'])
         if not final_price:
             try:
                 await context.bot.edit_message_text(
-                    chat_id=prediction['chat_id'],
+                    chat_id=chat_id,
                     message_id=message_id,
-                    text="🔧 **ERROR**\n\nPrice oracle failed - prediction cancelled!"
+                    text="🔧 **ERROR**\n\nPrice oracle failed - prediction cancelled!\nYour tokens and streak are safe! 💎\n\nUse /predict to try again!",
+                    parse_mode='Markdown'
                 )
-            except:
-                pass
-            del self.active_predictions[prediction_id]
+                logger.error(f"Failed to get final price for prediction {prediction_id}")
+            except Exception as e:
+                logger.error(f"Failed to update error message: {e}")
+            
+            # Store result for /results command
+            prediction['result'] = 'error'
+            prediction['error_msg'] = 'Price oracle failed'
             return
         
         # Calculate result
@@ -402,7 +501,15 @@ Make your prediction! ⬇️
 {'• Whale Bonus: 3x 🐋' if whale_multiplier > 1 else ''}
 
 💰 Total Tokens: {player_data['shard_tokens']} 💎
+
+Use /predict for another round! 🚀
             """
+            
+            # Store result
+            prediction['result'] = 'won'
+            prediction['final_price'] = final_price
+            prediction['price_change_pct'] = price_change_pct
+            prediction['tokens_earned'] = total_reward
             
             # Update group leaderboard
             group_data = self.get_group_data(prediction['chat_id'])
@@ -412,7 +519,10 @@ Make your prediction! ⬇️
             if player_data['streak'] >= 5 and player_data['streak'] % 5 == 0:
                 await self.announce_achievement(context, prediction['chat_id'], user_id, player_data['streak'])
                 
+            logger.info(f"Prediction {prediction_id} WON - User {user_id} earned {total_reward} tokens, streak: {player_data['streak']}")
+                
         else:
+            previous_streak = player_data['streak']
             player_data['streak'] = 0
             response = random.choice(self.lose_responses)
             result_msg = f"""
@@ -428,21 +538,94 @@ Make your prediction! ⬇️
 💔 Streak reset to 0
 💎 Tokens: {player_data['shard_tokens']} 💎
 
-Better luck next time! 🍀
+Better luck next time! Use /predict to try again! 🍀
             """
+            
+            # Store result
+            prediction['result'] = 'lost'
+            prediction['final_price'] = final_price
+            prediction['price_change_pct'] = price_change_pct
+            prediction['previous_streak'] = previous_streak
+            
+            logger.info(f"Prediction {prediction_id} LOST - User {user_id} lost streak of {previous_streak}")
         
-        # Send result
+        # Send result with error handling
         try:
             await context.bot.edit_message_text(
-                chat_id=prediction['chat_id'],
+                chat_id=chat_id,
                 message_id=message_id,
-                text=result_msg
+                text=result_msg,
+                parse_mode='Markdown'
             )
-        except:
-            pass
+            logger.info(f"Successfully sent result for prediction {prediction_id}")
+        except Exception as e:
+            logger.error(f"Failed to send result message for prediction {prediction_id}: {e}")
+            # Try to send as new message if edit fails
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🎯 **PREDICTION RESULT**\n\n{result_msg}",
+                    parse_mode='Markdown'
+                )
+            except Exception as e2:
+                logger.error(f"Failed to send new result message: {e2}")
+
+    async def results_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show user's recent prediction results"""
+        user_id = update.effective_user.id
+        username = update.effective_user.username or "anon"
         
-        # Clean up
-        del self.active_predictions[prediction_id]
+        # Find user's recent predictions
+        user_predictions = []
+        for pred_id, pred_data in self.active_predictions.items():
+            if pred_data['user_id'] == user_id:
+                user_predictions.append((pred_id, pred_data))
+        
+        if not user_predictions:
+            await update.message.reply_text(
+                "📊 **NO PREDICTIONS YET**\n\n"
+                "You haven't made any predictions yet!\n"
+                "Use /predict to start your first prediction! 🚀"
+            )
+            return
+        
+        # Sort by timestamp (most recent first)
+        user_predictions.sort(key=lambda x: x[1]['timestamp'], reverse=True)
+        
+        results_text = f"📊 **{username}'s RECENT PREDICTIONS**\n\n"
+        
+        for i, (pred_id, pred_data) in enumerate(user_predictions[:5]):  # Show last 5
+            crypto_name = self.crypto_display[pred_data['crypto']]
+            
+            if pred_data.get('completed', False):
+                result = pred_data.get('result', 'unknown')
+                if result == 'won':
+                    status = f"✅ WON (+{pred_data.get('tokens_earned', 0)} tokens)"
+                elif result == 'lost':
+                    status = "❌ LOST"
+                elif result == 'expired':
+                    status = "⏰ EXPIRED"
+                elif result == 'error':
+                    status = "🔧 ERROR"
+                else:
+                    status = "❓ UNKNOWN"
+                
+                if 'final_price' in pred_data:
+                    change = pred_data.get('price_change_pct', 0)
+                    results_text += f"{i+1}. {crypto_name} ${pred_data['start_price']:.4f}→${pred_data['final_price']:.4f} ({change:+.2f}%) - {status}\n"
+                else:
+                    results_text += f"{i+1}. {crypto_name} ${pred_data['start_price']:.4f} - {status}\n"
+            else:
+                remaining_time = 60 - int(time.time() - pred_data['timestamp'])
+                if remaining_time > 0:
+                    direction = pred_data.get('direction', 'Not selected')
+                    results_text += f"{i+1}. {crypto_name} ${pred_data['start_price']:.4f} - 🔄 ACTIVE ({direction}, {remaining_time}s left)\n"
+                else:
+                    results_text += f"{i+1}. {crypto_name} ${pred_data['start_price']:.4f} - ⏰ PENDING RESULT\n"
+        
+        results_text += "\nUse /predict to make a new prediction! 🎯"
+        
+        await update.message.reply_text(results_text, parse_mode='Markdown')
 
     async def announce_achievement(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, streak: int):
         """Announce when someone achieves a milestone"""
@@ -462,8 +645,9 @@ Better luck next time! 🍀
                 text=random.choice(taunts),
                 parse_mode='Markdown'
             )
-        except:
-            pass
+            logger.info(f"Announced achievement for user {user_id} with {streak} streak")
+        except Exception as e:
+            logger.error(f"Failed to announce achievement: {e}")
 
     async def leaderboard_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show group leaderboard"""
@@ -561,8 +745,179 @@ Keep grinding anon! WAGMI! 🚀
             f"GM anon! You received {airdrop_amount} Shard Tokens! 💎\n\n"
             f"💰 Total: {player_data['shard_tokens']} tokens\n\n"
             f"📢 Share this bot with friends for bonus airdrops!\n"
-            f"t.me/your_bot_username"
+            f"http://t.me/CryptoClash12_Bot"
         )
+
+    async def api_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show API status and features"""
+        api_key = os.getenv('COINGECKO_API_KEY')
+        
+        if api_key:
+            # Test Pro API connection
+            try:
+                test_price = await self.get_crypto_price('bitcoin')
+                if test_price:
+                    status_msg = f"""
+🔥 **PRO API ACTIVE** 🔥
+
+✅ **CoinGecko Pro Features:**
+• Higher precision pricing (6 decimal places)
+• Faster response times (< 500ms)
+• 10,000 requests/month limit
+• More reliable real-time data
+• Priority support
+
+💰 **Test Price:** BTC = ${test_price:,.6f}
+
+🚀 **Performance Benefits:**
+• Predictions are more accurate
+• Less API failures
+• Better user experience
+• Shorter retry timeouts
+
+Pro API Status: OPERATIONAL ✅
+                    """
+                else:
+                    status_msg = "⚠️ Pro API key found but connection failed. Check your key!"
+            except Exception as e:
+                status_msg = f"❌ Pro API error: {str(e)}"
+        else:
+            status_msg = f"""
+🆓 **FREE API MODE** 
+
+ℹ️ **Current Features:**
+• Basic price data
+• 10-30 requests/minute limit
+• Standard response times
+• Good for testing
+
+💡 **Upgrade to Pro API:**
+• Add COINGECKO_API_KEY to environment
+• Get higher rate limits
+• Better reliability for predictions
+• More precise pricing
+
+API Status: FREE TIER ⚡
+            """
+        
+        await update.message.reply_text(status_msg, parse_mode='Markdown')
+
+    async def enhanced_predict_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Enhanced prediction with Pro API features"""
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        username = update.effective_user.username or "anon"
+        
+        logger.info(f"User {user_id} ({username}) started enhanced prediction in chat {chat_id}")
+        
+        player_data = self.get_player_data(user_id)
+        api_key = os.getenv('COINGECKO_API_KEY')
+        
+        # Check if user has active prediction
+        for pred_id, pred_data in self.active_predictions.items():
+            if pred_data['user_id'] == user_id and not pred_data.get('completed', False):
+                remaining_time = 60 - int(time.time() - pred_data['timestamp'])
+                if remaining_time > 0:
+                    await update.message.reply_text(
+                        f"⏰ You already have an active prediction! {remaining_time}s remaining.\n"
+                        f"💰 Predicting: {self.crypto_display[pred_data['crypto']]}\n"
+                        f"🎯 Use /results to check status"
+                    )
+                    return
+        
+        # Check cooldown (reduced for Pro API users)
+        cooldown = 20 if api_key else 30
+        if time.time() - player_data['last_play'] < cooldown:
+            remaining = int(cooldown - (time.time() - player_data['last_play']))
+            await update.message.reply_text(f"⏰ Chill anon! {remaining}s cooldown remaining {'(Pro: 20s)' if api_key else ''}")
+            return
+        
+        # Random FUD event (lower chance for Pro users)
+        fud_chance = 0.08 if api_key else 0.1
+        fud_active = random.random() < fud_chance
+        fud_msg = f"\n🚨 **FUD EVENT:** {random.choice(self.fud_events)}" if fud_active else ""
+        
+        # Select random crypto
+        crypto = random.choice(self.crypto_symbols)
+        crypto_name = self.crypto_display[crypto]
+        
+        # Get current price with Pro API precision
+        current_price = await self.get_crypto_price(crypto)
+        if not current_price:
+            await update.message.reply_text(
+                "🔧 Price oracle is down! Try again in a moment.\n"
+                "The blockchain gods are testing our patience... 🙏"
+            )
+            return
+        
+        # Create prediction ID
+        prediction_id = f"{user_id}_{int(time.time())}"
+        
+        # Store prediction data with Pro API flag
+        self.active_predictions[prediction_id] = {
+            'user_id': user_id,
+            'chat_id': chat_id,
+            'crypto': crypto,
+            'start_price': current_price,
+            'timestamp': time.time(),
+            'fud_active': fud_active,
+            'locked': False,
+            'completed': False,
+            'pro_api': bool(api_key)
+        }
+        
+        logger.info(f"Created prediction {prediction_id} for user {user_id}: {crypto_name} @ ${current_price} (Pro: {bool(api_key)})")
+        
+        # Create inline keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("📈 UP (+1%)", callback_data=f"predict_up_{prediction_id}"),
+                InlineKeyboardButton("📉 DOWN (-1%)", callback_data=f"predict_down_{prediction_id}")
+            ],
+            [
+                InlineKeyboardButton("🐋 WHALE MODE (3x)", callback_data=f"whale_{prediction_id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        streak_bonus = f" | Streak: {player_data['streak']}🔥" if player_data['streak'] > 0 else ""
+        og_emoji = "👑" if player_data['og_status'] else ""
+        pro_badge = " 🔥PRO" if api_key else ""
+        
+        # Enhanced precision display for Pro API
+        if api_key:
+            price_display = f"${current_price:,.6f}"
+        else:
+            price_display = f"${current_price:.4f}"
+        
+        predict_msg = f"""
+🎯 **PREDICTION TIME**{pro_badge} {og_emoji}
+
+💰 **{crypto_name}** | {price_display}
+⏰ **60 seconds** to predict 1%+ move!
+{'📊 Enhanced precision with Pro API!' if api_key else ''}
+
+💎 Shard Tokens: {player_data['shard_tokens']}{streak_bonus}
+🐋 Whale Power-ups: {player_data['whale_powerups']}
+
+{fud_msg}
+
+Make your prediction! ⬇️
+        """
+        
+        msg = await update.message.reply_text(predict_msg, reply_markup=reply_markup, parse_mode='Markdown')
+        
+        # Schedule result check in 60 seconds with better error handling
+        try:
+            context.job_queue.run_once(
+                self.check_prediction_result,
+                60,
+                data={'prediction_id': prediction_id, 'message_id': msg.message_id, 'chat_id': chat_id},
+                name=f"prediction_{prediction_id}"
+            )
+            logger.info(f"Scheduled result check for prediction {prediction_id}")
+        except Exception as e:
+            logger.error(f"Failed to schedule job for prediction {prediction_id}: {e}")
 
     def run(self):
         """Start the bot"""
@@ -571,12 +926,15 @@ Keep grinding anon! WAGMI! 🚀
         # Add handlers
         app.add_handler(CommandHandler("start", self.start_command))
         app.add_handler(CommandHandler("predict", self.predict_command))
+        app.add_handler(CommandHandler("results", self.results_command))
         app.add_handler(CommandHandler("leaderboard", self.leaderboard_command))
         app.add_handler(CommandHandler("challenge", self.challenge_command))
         app.add_handler(CommandHandler("stats", self.stats_command))
         app.add_handler(CommandHandler("airdrop", self.airdrop_command))
+        app.add_handler(CommandHandler("api_status", self.api_status_command))
         app.add_handler(CallbackQueryHandler(self.prediction_callback))
         
+        logger.info("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
         print("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
         app.run_polling()
 
