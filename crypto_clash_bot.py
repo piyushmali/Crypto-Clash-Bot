@@ -225,9 +225,12 @@ GM {username}! Ready to prove your diamond hands? 💎
 
 {og_msg}
 
-Use /predict to start your first prediction!
-Use /leaderboard to see who's dominating
-Use /results to see your last prediction result
+🚀 **Commands:**
+• /predict - Start new prediction
+• /results - Check prediction history  
+• /check - Manual result check (if needed)
+• /leaderboard - See group rankings
+• /test_api - Test API connection
 
 WAGMI! 🚀
         """
@@ -332,6 +335,15 @@ Make your prediction! ⬇️
         
         # Schedule result check in 60 seconds with better error handling
         try:
+            if context.job_queue is None:
+                logger.error("JobQueue not available - results will not be automatically checked!")
+                await update.message.reply_text(
+                    "⚠️ **TECHNICAL ISSUE** ⚠️\n\n"
+                    "Results won't auto-update. Use /results to check manually in 60s!\n"
+                    "Your prediction is still valid! 🎯"
+                )
+                return
+            
             context.job_queue.run_once(
                 self.check_prediction_result,
                 60,
@@ -341,6 +353,11 @@ Make your prediction! ⬇️
             logger.info(f"Scheduled result check for prediction {prediction_id}")
         except Exception as e:
             logger.error(f"Failed to schedule job for prediction {prediction_id}: {e}")
+            await update.message.reply_text(
+                "⚠️ **TIMER ISSUE** ⚠️\n\n"
+                "Use /results to check your prediction result in 60 seconds!\n"
+                "Your prediction is locked and will be processed! 🎯"
+            )
 
     async def prediction_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle prediction button clicks with proper locking"""
@@ -608,13 +625,23 @@ Better luck next time! Use /predict to try again! 🍀
         
         # Send result with error handling
         try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=result_msg,
-                parse_mode='Markdown'
-            )
-            logger.info(f"Successfully sent result for prediction {prediction_id}")
+            message_id = job_data.get('message_id')
+            if message_id:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=result_msg,
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Successfully sent result for prediction {prediction_id}")
+            else:
+                # Send as new message if no message_id (manual check)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🎯 **PREDICTION RESULT**\n\n{result_msg}",
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Sent new result message for prediction {prediction_id}")
         except Exception as e:
             logger.error(f"Failed to send result message for prediction {prediction_id}: {e}")
             # Try to send as new message if edit fails
@@ -909,9 +936,69 @@ Try /test_api again in a few minutes! ⏰
         
         await update.message.reply_text(status_msg, parse_mode='Markdown')
 
+    async def check_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Manually check prediction results (when JobQueue fails)"""
+        user_id = update.effective_user.id
+        
+        # Find user's active predictions that should be completed
+        completed_count = 0
+        for pred_id, pred_data in self.active_predictions.items():
+            if (pred_data['user_id'] == user_id and 
+                not pred_data.get('completed', False) and 
+                'direction' in pred_data and
+                time.time() - pred_data['timestamp'] >= 60):
+                
+                # Manually trigger result check
+                logger.info(f"Manually checking prediction {pred_id}")
+                
+                # Create fake context for the result check
+                class FakeJob:
+                    def __init__(self, data):
+                        self.data = data
+                
+                class FakeContext:
+                    def __init__(self, bot):
+                        self.bot = bot
+                        self.job = FakeJob({
+                            'prediction_id': pred_id,
+                            'message_id': None,  # Will be handled gracefully
+                            'chat_id': pred_data['chat_id']
+                        })
+                
+                fake_context = FakeContext(context.bot)
+                await self.check_prediction_result(fake_context)
+                completed_count += 1
+        
+        if completed_count > 0:
+            await update.message.reply_text(f"✅ Checked {completed_count} pending prediction(s)!")
+        else:
+            await update.message.reply_text("📊 No pending predictions to check. Use /results to see your history!")
+
+    async def test_timer_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Test if JobQueue/timer is working"""
+        if context.job_queue is None:
+            await update.message.reply_text(
+                "❌ **TIMER NOT WORKING** ❌\n\n"
+                "JobQueue is not set up properly.\n"
+                "Predictions won't auto-complete.\n\n"
+                "💡 **Solutions:**\n"
+                "• Use /check to manually check results\n"
+                "• Use /results to see prediction history\n"
+                "• Contact admin to fix JobQueue"
+            )
+        else:
+            await update.message.reply_text("✅ Timer system is working! Predictions will auto-complete in 60s.")
+
     def run(self):
         """Start the bot"""
+        # Build application with JobQueue enabled
         app = Application.builder().token(self.token).build()
+        
+        # Verify JobQueue is available
+        if app.job_queue is None:
+            logger.error("JobQueue not available! Predictions will not work properly.")
+            print("❌ ERROR: JobQueue not set up. Install with: pip install 'python-telegram-bot[job-queue]'")
+            return
         
         # Add handlers
         app.add_handler(CommandHandler("start", self.start_command))
@@ -923,10 +1010,14 @@ Try /test_api again in a few minutes! ⏰
         app.add_handler(CommandHandler("airdrop", self.airdrop_command))
         app.add_handler(CommandHandler("api_status", self.api_status_command))
         app.add_handler(CommandHandler("test_api", self.test_api_command))
+        app.add_handler(CommandHandler("check", self.check_command))
+        app.add_handler(CommandHandler("test_timer", self.test_timer_command))
         app.add_handler(CallbackQueryHandler(self.prediction_callback))
         
         logger.info("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
+        logger.info(f"✅ JobQueue enabled: {app.job_queue is not None}")
         print("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
+        print(f"✅ JobQueue enabled: {app.job_queue is not None}")
         app.run_polling()
 
 if __name__ == "__main__":
