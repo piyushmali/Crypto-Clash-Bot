@@ -2,6 +2,8 @@
 
 An addictive Telegram bot game where players predict short-term cryptocurrency price movements in viral, social gameplay loops.
 
+**🚀 [Try the Live Bot: @CryptoClash12_Bot](http://t.me/CryptoClash12_Bot) 🚀**
+
 ## 🔥 Features
 
 ### Core Gameplay
@@ -53,6 +55,8 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 python crypto_clash_bot.py
 ```
 
+**🎮 Or just play the live version: [http://t.me/CryptoClash12_Bot](http://t.me/CryptoClash12_Bot)**
+
 ## 🎯 Commands
 
 - `/start` - Welcome new players & show stats
@@ -87,6 +91,8 @@ When players hit milestones, the bot automatically posts challenges:
 - Referral-style bonuses for spreading the bot
 - Group vs group competitive modes
 - Exclusive power-ups for active communities
+
+**📢 Share the bot: [http://t.me/CryptoClash12_Bot](http://t.me/CryptoClash12_Bot)**
 
 ## 🔧 Technical Architecture
 
@@ -154,6 +160,8 @@ self.win_responses = [
 - Create group vs group tournaments
 - Regular feature updates and events
 
+**🚀 Add to your group: [http://t.me/CryptoClash12_Bot](http://t.me/CryptoClash12_Bot)**
+
 ## 📈 Analytics & Optimization
 
 Track these metrics for growth:
@@ -184,6 +192,8 @@ Track these metrics for growth:
 MIT License - feel free to modify and distribute
 
 ---
+
+**🎮 [Play Now: @CryptoClash12_Bot](http://t.me/CryptoClash12_Bot)**
 
 **WAGMI! Let's make crypto predictions fun and addictive! 🚀💎**
 
