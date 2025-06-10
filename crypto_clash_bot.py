@@ -33,6 +33,12 @@ class CryptoClashBot:
         self.active_predictions = {}  # prediction_id: {user_id, chat_id, crypto, direction, start_price, timestamp, locked}
         self.group_challenges = {}  # challenge_id: {group1, group2, start_time, duration}
         
+        # Price caching for free API (avoid rate limits)
+        self.price_cache = {}  # symbol: {price, timestamp}
+        self.cache_duration = 30  # Cache prices for 30 seconds
+        self.last_api_call = 0  # Track last API call time
+        self.min_api_interval = 2  # Minimum 2 seconds between API calls for free tier
+        
         # Crypto symbols for predictions
         self.crypto_symbols = ['bitcoin', 'ethereum', 'binancecoin', 'cardano', 'solana']
         self.crypto_display = {
@@ -92,42 +98,90 @@ class CryptoClashBot:
             }
         return self.group_data[chat_id]
 
-    async def get_crypto_price(self, symbol: str, retries: int = 3) -> Optional[float]:
-        """Fetch current crypto price from CoinGecko with API key and retry mechanism"""
-        # Get API key from environment
+    async def get_crypto_price(self, symbol: str, retries: int = 2) -> Optional[float]:
+        """Fetch current crypto price from CoinGecko FREE API with caching and rate limiting"""
+        # Check cache first
+        current_time = time.time()
+        if symbol in self.price_cache:
+            cached_data = self.price_cache[symbol]
+            if current_time - cached_data['timestamp'] < self.cache_duration:
+                logger.info(f"Using cached price for {symbol}: ${cached_data['price']}")
+                return cached_data['price']
+        
+        # Check API rate limiting for free tier
+        time_since_last_call = current_time - self.last_api_call
+        if time_since_last_call < self.min_api_interval:
+            wait_time = self.min_api_interval - time_since_last_call
+            logger.info(f"Rate limiting: waiting {wait_time:.1f}s before API call")
+            await asyncio.sleep(wait_time)
+        
+        # Try to get API key (but we'll use free tier optimizations)
         api_key = os.getenv('COINGECKO_API_KEY')
         
         for attempt in range(retries):
             try:
                 logger.info(f"Fetching price for {symbol}, attempt {attempt + 1}")
                 
-                # Use Pro API if key is available, otherwise use free API
-                if api_key:
-                    url = f"https://pro-api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd&precision=6"
-                    headers = {
-                        'x-cg-pro-api-key': api_key,
-                        'User-Agent': 'CryptoClash-Bot/1.0'
-                    }
-                    logger.info(f"Using CoinGecko Pro API with key for {symbol}")
-                else:
-                    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd&precision=6"
-                    headers = {
-                        'User-Agent': 'CryptoClash-Bot/1.0'
-                    }
-                    logger.info(f"Using CoinGecko Free API for {symbol}")
+                # Always use free API endpoint but with optimizations
+                url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
+                headers = {
+                    'User-Agent': 'CryptoClash-Bot/1.0',
+                    'Accept': 'application/json'
+                }
                 
-                response = requests.get(url, headers=headers, timeout=10)
+                # Add pro header if available
+                if api_key:
+                    headers['x-cg-pro-api-key'] = api_key
+                    logger.info(f"Using Pro API key for {symbol}")
+                else:
+                    logger.info(f"Using Free API for {symbol}")
+                
+                self.last_api_call = time.time()
+                response = requests.get(url, headers=headers, timeout=15)
+                
+                # Handle rate limiting specifically
+                if response.status_code == 429:
+                    logger.warning(f"Rate limited! Status: 429. Waiting before retry...")
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    wait_time = min(retry_after, 60)  # Max 60s wait
+                    await asyncio.sleep(wait_time)
+                    continue
+                
                 response.raise_for_status()
                 data = response.json()
+                
+                if symbol not in data:
+                    logger.error(f"Symbol {symbol} not found in API response")
+                    continue
+                    
                 price = data[symbol]['usd']
-                logger.info(f"Successfully fetched {symbol} price: ${price} (Pro API: {bool(api_key)})")
+                
+                # Cache the price
+                self.price_cache[symbol] = {
+                    'price': price,
+                    'timestamp': time.time()
+                }
+                
+                logger.info(f"Successfully fetched {symbol} price: ${price} (API key: {bool(api_key)})")
                 return price
                 
-            except Exception as e:
-                logger.error(f"Error fetching price for {symbol} (attempt {attempt + 1}): {e}")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request error for {symbol} (attempt {attempt + 1}): {e}")
                 if attempt < retries - 1:
-                    await asyncio.sleep(1.5 ** attempt)  # Shorter backoff with Pro API
+                    await asyncio.sleep(3 + attempt * 2)  # Progressive backoff
                 continue
+            except Exception as e:
+                logger.error(f"Unexpected error fetching price for {symbol} (attempt {attempt + 1}): {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(2)
+                continue
+        
+        # If all retries failed, try to use cached data even if expired
+        if symbol in self.price_cache:
+            cached_data = self.price_cache[symbol]
+            age_minutes = (time.time() - cached_data['timestamp']) / 60
+            logger.warning(f"Using expired cache for {symbol} (age: {age_minutes:.1f}min)")
+            return cached_data['price']
         
         logger.error(f"Failed to fetch price for {symbol} after {retries} attempts")
         return None
@@ -202,10 +256,13 @@ WAGMI! 🚀
                     )
                     return
         
-        # Check cooldown (prevent spam)
-        if time.time() - player_data['last_play'] < 30:
-            remaining = int(30 - (time.time() - player_data['last_play']))
-            await update.message.reply_text(f"⏰ Chill anon! {remaining}s cooldown remaining")
+        # Check cooldown (longer for free API to avoid rate limits)
+        api_key = os.getenv('COINGECKO_API_KEY')
+        cooldown = 45 if not api_key else 30  # 45s for free, 30s for pro
+        if time.time() - player_data['last_play'] < cooldown:
+            remaining = int(cooldown - (time.time() - player_data['last_play']))
+            tier = "Free" if not api_key else "Pro"
+            await update.message.reply_text(f"⏰ Chill anon! {remaining}s cooldown remaining ({tier} tier)")
             return
         
         # Random FUD event (10% chance)
@@ -802,122 +859,55 @@ API Status: FREE TIER ⚡
         
         await update.message.reply_text(status_msg, parse_mode='Markdown')
 
-    async def enhanced_predict_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Enhanced prediction with Pro API features"""
-        user_id = update.effective_user.id
-        chat_id = update.effective_chat.id
-        username = update.effective_user.username or "anon"
+    async def test_api_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Test CoinGecko API connection"""
+        await update.message.reply_text("🔍 Testing API connection... Please wait!")
         
-        logger.info(f"User {user_id} ({username}) started enhanced prediction in chat {chat_id}")
-        
-        player_data = self.get_player_data(user_id)
         api_key = os.getenv('COINGECKO_API_KEY')
+        tier = "Pro" if api_key else "Free"
         
-        # Check if user has active prediction
-        for pred_id, pred_data in self.active_predictions.items():
-            if pred_data['user_id'] == user_id and not pred_data.get('completed', False):
-                remaining_time = 60 - int(time.time() - pred_data['timestamp'])
-                if remaining_time > 0:
-                    await update.message.reply_text(
-                        f"⏰ You already have an active prediction! {remaining_time}s remaining.\n"
-                        f"💰 Predicting: {self.crypto_display[pred_data['crypto']]}\n"
-                        f"🎯 Use /results to check status"
-                    )
-                    return
-        
-        # Check cooldown (reduced for Pro API users)
-        cooldown = 20 if api_key else 30
-        if time.time() - player_data['last_play'] < cooldown:
-            remaining = int(cooldown - (time.time() - player_data['last_play']))
-            await update.message.reply_text(f"⏰ Chill anon! {remaining}s cooldown remaining {'(Pro: 20s)' if api_key else ''}")
-            return
-        
-        # Random FUD event (lower chance for Pro users)
-        fud_chance = 0.08 if api_key else 0.1
-        fud_active = random.random() < fud_chance
-        fud_msg = f"\n🚨 **FUD EVENT:** {random.choice(self.fud_events)}" if fud_active else ""
-        
-        # Select random crypto
-        crypto = random.choice(self.crypto_symbols)
-        crypto_name = self.crypto_display[crypto]
-        
-        # Get current price with Pro API precision
-        current_price = await self.get_crypto_price(crypto)
-        if not current_price:
-            await update.message.reply_text(
-                "🔧 Price oracle is down! Try again in a moment.\n"
-                "The blockchain gods are testing our patience... 🙏"
-            )
-            return
-        
-        # Create prediction ID
-        prediction_id = f"{user_id}_{int(time.time())}"
-        
-        # Store prediction data with Pro API flag
-        self.active_predictions[prediction_id] = {
-            'user_id': user_id,
-            'chat_id': chat_id,
-            'crypto': crypto,
-            'start_price': current_price,
-            'timestamp': time.time(),
-            'fud_active': fud_active,
-            'locked': False,
-            'completed': False,
-            'pro_api': bool(api_key)
-        }
-        
-        logger.info(f"Created prediction {prediction_id} for user {user_id}: {crypto_name} @ ${current_price} (Pro: {bool(api_key)})")
-        
-        # Create inline keyboard
-        keyboard = [
-            [
-                InlineKeyboardButton("📈 UP (+1%)", callback_data=f"predict_up_{prediction_id}"),
-                InlineKeyboardButton("📉 DOWN (-1%)", callback_data=f"predict_down_{prediction_id}")
-            ],
-            [
-                InlineKeyboardButton("🐋 WHALE MODE (3x)", callback_data=f"whale_{prediction_id}")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        streak_bonus = f" | Streak: {player_data['streak']}🔥" if player_data['streak'] > 0 else ""
-        og_emoji = "👑" if player_data['og_status'] else ""
-        pro_badge = " 🔥PRO" if api_key else ""
-        
-        # Enhanced precision display for Pro API
-        if api_key:
-            price_display = f"${current_price:,.6f}"
-        else:
-            price_display = f"${current_price:.4f}"
-        
-        predict_msg = f"""
-🎯 **PREDICTION TIME**{pro_badge} {og_emoji}
-
-💰 **{crypto_name}** | {price_display}
-⏰ **60 seconds** to predict 1%+ move!
-{'📊 Enhanced precision with Pro API!' if api_key else ''}
-
-💎 Shard Tokens: {player_data['shard_tokens']}{streak_bonus}
-🐋 Whale Power-ups: {player_data['whale_powerups']}
-
-{fud_msg}
-
-Make your prediction! ⬇️
-        """
-        
-        msg = await update.message.reply_text(predict_msg, reply_markup=reply_markup, parse_mode='Markdown')
-        
-        # Schedule result check in 60 seconds with better error handling
         try:
-            context.job_queue.run_once(
-                self.check_prediction_result,
-                60,
-                data={'prediction_id': prediction_id, 'message_id': msg.message_id, 'chat_id': chat_id},
-                name=f"prediction_{prediction_id}"
-            )
-            logger.info(f"Scheduled result check for prediction {prediction_id}")
+            # Test with Bitcoin price
+            start_time = time.time()
+            price = await self.get_crypto_price('bitcoin')
+            response_time = (time.time() - start_time) * 1000  # Convert to ms
+            
+            if price:
+                status_msg = f"""
+✅ **API TEST SUCCESSFUL** ✅
+
+🔧 **Connection Details:**
+• Tier: {tier} API
+• Response Time: {response_time:.0f}ms
+• Test Price: BTC = ${price:,.2f}
+
+📊 **Rate Limiting:**
+• Cooldown: {45 if not api_key else 30}s between predictions
+• Cache Duration: {self.cache_duration}s
+• Min API Interval: {self.min_api_interval}s
+
+🚀 **Status:** Ready for predictions!
+
+Use /predict to start playing! 🎯
+                """
+            else:
+                status_msg = f"""
+❌ **API TEST FAILED** ❌
+
+🔧 **Issue:** Unable to fetch price data
+💡 **Solutions:**
+• Wait a few minutes and try again
+• Check internet connection
+• API might be temporarily down
+
+📊 **Current Tier:** {tier}
+
+Try /test_api again in a few minutes! ⏰
+                """
         except Exception as e:
-            logger.error(f"Failed to schedule job for prediction {prediction_id}: {e}")
+            status_msg = f"❌ **API ERROR:** {str(e)}\n\nTry again in a few minutes! 🙏"
+        
+        await update.message.reply_text(status_msg, parse_mode='Markdown')
 
     def run(self):
         """Start the bot"""
@@ -932,6 +922,7 @@ Make your prediction! ⬇️
         app.add_handler(CommandHandler("stats", self.stats_command))
         app.add_handler(CommandHandler("airdrop", self.airdrop_command))
         app.add_handler(CommandHandler("api_status", self.api_status_command))
+        app.add_handler(CommandHandler("test_api", self.test_api_command))
         app.add_handler(CallbackQueryHandler(self.prediction_callback))
         
         logger.info("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
