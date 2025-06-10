@@ -991,34 +991,59 @@ Try /test_api again in a few minutes! ⏰
 
     def run(self):
         """Start the bot"""
-        # Build application with JobQueue enabled
-        app = Application.builder().token(self.token).build()
-        
-        # Verify JobQueue is available
-        if app.job_queue is None:
-            logger.error("JobQueue not available! Predictions will not work properly.")
-            print("❌ ERROR: JobQueue not set up. Install with: pip install 'python-telegram-bot[job-queue]'")
-            return
-        
-        # Add handlers
-        app.add_handler(CommandHandler("start", self.start_command))
-        app.add_handler(CommandHandler("predict", self.predict_command))
-        app.add_handler(CommandHandler("results", self.results_command))
-        app.add_handler(CommandHandler("leaderboard", self.leaderboard_command))
-        app.add_handler(CommandHandler("challenge", self.challenge_command))
-        app.add_handler(CommandHandler("stats", self.stats_command))
-        app.add_handler(CommandHandler("airdrop", self.airdrop_command))
-        app.add_handler(CommandHandler("api_status", self.api_status_command))
-        app.add_handler(CommandHandler("test_api", self.test_api_command))
-        app.add_handler(CommandHandler("check", self.check_command))
-        app.add_handler(CommandHandler("test_timer", self.test_timer_command))
-        app.add_handler(CallbackQueryHandler(self.prediction_callback))
-        
-        logger.info("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
-        logger.info(f"✅ JobQueue enabled: {app.job_queue is not None}")
-        print("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
-        print(f"✅ JobQueue enabled: {app.job_queue is not None}")
-        app.run_polling()
+        try:
+            # Build application with JobQueue enabled
+            app = Application.builder().token(self.token).build()
+            
+            # Verify JobQueue is available
+            if app.job_queue is None:
+                logger.error("JobQueue not available! Predictions will not work properly.")
+                print("❌ ERROR: JobQueue not set up. Install with: pip install 'python-telegram-bot[job-queue]'")
+                return
+            
+            # Add handlers
+            app.add_handler(CommandHandler("start", self.start_command))
+            app.add_handler(CommandHandler("predict", self.predict_command))
+            app.add_handler(CommandHandler("results", self.results_command))
+            app.add_handler(CommandHandler("leaderboard", self.leaderboard_command))
+            app.add_handler(CommandHandler("challenge", self.challenge_command))
+            app.add_handler(CommandHandler("stats", self.stats_command))
+            app.add_handler(CommandHandler("airdrop", self.airdrop_command))
+            app.add_handler(CommandHandler("api_status", self.api_status_command))
+            app.add_handler(CommandHandler("test_api", self.test_api_command))
+            app.add_handler(CommandHandler("check", self.check_command))
+            app.add_handler(CommandHandler("test_timer", self.test_timer_command))
+            app.add_handler(CallbackQueryHandler(self.prediction_callback))
+            
+            logger.info("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
+            logger.info(f"✅ JobQueue enabled: {app.job_queue is not None}")
+            print("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
+            print(f"✅ JobQueue enabled: {app.job_queue is not None}")
+            
+            # Run with better error handling
+            app.run_polling(
+                drop_pending_updates=True,  # Clear any pending updates
+                close_loop=False
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to start bot: {e}")
+            print(f"❌ Bot startup failed: {e}")
+            
+            # Check for common issues
+            if "Conflict" in str(e):
+                print("\n💡 SOLUTION: Another bot instance is running!")
+                print("• Stop all other instances of this bot")
+                print("• Wait 30 seconds and try again")
+                print("• Make sure only ONE instance runs at a time")
+            elif "Unauthorized" in str(e):
+                print("\n💡 SOLUTION: Bot token issue!")
+                print("• Check your TELEGRAM_BOT_TOKEN in .env")
+                print("• Make sure the token is correct")
+            else:
+                print("\n💡 Check the error above and try again")
+            
+            raise
 
 if __name__ == "__main__":
     bot = CryptoClashBot()
