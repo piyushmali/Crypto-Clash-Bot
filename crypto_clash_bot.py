@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -193,7 +193,7 @@ class CryptoClashBot:
         chat_id = update.effective_chat.id
         username = update.effective_user.username or "anon"
         
-        logger.info(f"User {user_id} ({username}) started the bot in chat {chat_id}")
+        logger.info(f"🎯 START COMMAND: User {user_id} ({username}) started the bot in chat {chat_id}")
         
         player_data = self.get_player_data(user_id)
         group_data = self.get_group_data(chat_id)
@@ -236,7 +236,11 @@ GM {username}! Ready to prove your diamond hands? 💎
 WAGMI! 🚀
         """
         
-        await update.message.reply_text(welcome_msg, parse_mode='HTML')
+        try:
+            await update.message.reply_text(welcome_msg, parse_mode='HTML')
+            logger.info(f"✅ Successfully sent welcome message to user {user_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send welcome message to user {user_id}: {e}")
 
     async def predict_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start a new prediction"""
@@ -244,7 +248,7 @@ WAGMI! 🚀
         chat_id = update.effective_chat.id
         username = update.effective_user.username or "anon"
         
-        logger.info(f"User {user_id} ({username}) started prediction in chat {chat_id}")
+        logger.info(f"🎯 PREDICT COMMAND: User {user_id} ({username}) started prediction in chat {chat_id}")
         
         player_data = self.get_player_data(user_id)
         
@@ -990,6 +994,15 @@ Try /test_api again in a few minutes! ⏰
         else:
             await update.message.reply_text("✅ Timer system is working! Predictions will auto-complete in 60s.")
 
+    async def debug_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Debug handler to log all received messages"""
+        if update.message:
+            user_id = update.effective_user.id
+            username = update.effective_user.username or "anon"
+            text = update.message.text or "<non-text>"
+            chat_id = update.effective_chat.id
+            logger.info(f"🔍 DEBUG: Received message from {user_id} ({username}) in chat {chat_id}: '{text}'")
+
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """Log the error and gracefully shut down on conflict."""
         if isinstance(context.error, telegram.error.Conflict):
@@ -1027,6 +1040,9 @@ Try /test_api again in a few minutes! ⏰
             app.add_handler(CommandHandler("check", self.check_command))
             app.add_handler(CommandHandler("test_timer", self.test_timer_command))
             app.add_handler(CallbackQueryHandler(self.prediction_callback))
+            
+            # Add debug handler to catch all messages (put this last)
+            app.add_handler(MessageHandler(filters.ALL, self.debug_message_handler))
             
             logger.info("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
             logger.info(f"✅ JobQueue enabled: {app.job_queue is not None}")
