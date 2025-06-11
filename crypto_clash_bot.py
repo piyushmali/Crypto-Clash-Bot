@@ -33,6 +33,7 @@ class CryptoClashBot:
         self.group_data = {}   # chat_id: {leaderboard, og_count, total_players}
         self.active_predictions = {}  # prediction_id: {user_id, chat_id, crypto, direction, start_price, timestamp, locked}
         self.group_challenges = {}  # challenge_id: {group1, group2, start_time, duration}
+        self.daily_challenges = {}  # user_id: {challenge_type, progress, target, reward, completed}
         
         # Price caching for free API (avoid rate limits)
         self.price_cache = {}  # symbol: {price, timestamp}
@@ -47,13 +48,48 @@ class CryptoClashBot:
             'cardano': 'ADA', 'solana': 'SOL'
         }
         
-        # Crypto slang responses
+        # Level system configuration
+        self.level_requirements = {
+            1: 0, 2: 100, 3: 250, 4: 500, 5: 1000, 6: 2000, 7: 4000, 8: 8000, 9: 15000, 10: 30000
+        }
+        
+        # Achievement system
+        self.achievements = {
+            'first_win': {'name': '🎯 First Blood', 'desc': 'Win your first prediction', 'reward': 500},
+            'streak_5': {'name': '🔥 Hot Streak', 'desc': 'Get 5 wins in a row', 'reward': 1000},
+            'streak_10': {'name': '⚡ Lightning Rod', 'desc': 'Get 10 wins in a row', 'reward': 2500},
+            'whale_user': {'name': '🐋 Whale Rider', 'desc': 'Use whale mode 10 times', 'reward': 1500},
+            'high_roller': {'name': '💎 Diamond Hands', 'desc': 'Earn 10,000 shard tokens', 'reward': 3000},
+            'prophet': {'name': '🔮 Oracle', 'desc': 'Win 100 predictions', 'reward': 5000},
+            'daily_warrior': {'name': '⚔️ Daily Warrior', 'desc': 'Complete 7 daily challenges', 'reward': 2000}
+        }
+        
+        # Daily challenge types
+        self.challenge_types = [
+            {'type': 'win_streak', 'desc': 'Get 3 wins in a row', 'target': 3, 'reward': 300},
+            {'type': 'predictions', 'desc': 'Make 5 predictions today', 'target': 5, 'reward': 200},
+            {'type': 'whale_mode', 'desc': 'Use whale mode 2 times', 'target': 2, 'reward': 400},
+            {'type': 'perfect_day', 'desc': 'Win 3 predictions without losing', 'target': 3, 'reward': 500}
+        ]
+        
+        # Power-up shop items
+        self.shop_items = {
+            'whale_powerup': {'name': '🐋 Whale Mode', 'price': 500, 'desc': '3x reward multiplier'},
+            'streak_shield': {'name': '🛡️ Streak Shield', 'price': 1000, 'desc': 'Protect your streak once'},
+            'double_xp': {'name': '⭐ Double XP', 'price': 300, 'desc': 'Double XP for next 5 predictions'},
+            'lucky_charm': {'name': '🍀 Lucky Charm', 'price': 800, 'desc': 'Reduce required move to 0.5%'}
+        }
+        
+        # Crypto slang responses with more variety
         self.win_responses = [
             "🚀 WAGMI! You just went to the moon!",
             "💎 Diamond hands paid off! Shard tokens incoming!",
             "🦍 Ape strong! Your streak is pumping!",
             "⚡ Lightning prediction! The market can't stop you!",
-            "🔥 Absolutely based! You're built different!"
+            "🔥 Absolutely based! You're built different!",
+            "🎯 Sniper shot! You read the charts perfectly!",
+            "👑 Royalty move! You're the alpha trader!",
+            "🌙 To the moon! Your prediction was godlike!"
         ]
         
         self.lose_responses = [
@@ -61,7 +97,18 @@ class CryptoClashBot:
             "📉 Oof, that's a rug pull on your streak",
             "🤡 Paper hands move right there, anon",
             "💸 The market gods demand sacrifice",
-            "⛔ Not your keys, not your gains... wait, wrong saying"
+            "⛔ Not your keys, not your gains... wait, wrong saying",
+            "🔥 Got burned by the market makers!",
+            "😭 Even the whales make mistakes sometimes",
+            "💀 The bears got you this round!"
+        ]
+        
+        self.level_up_messages = [
+            "🎉 LEVEL UP! You're ascending to crypto godhood!",
+            "⚡ POWER SURGE! Your trading skills are evolving!",
+            "🚀 RANK UP! The moon is getting closer!",
+            "👑 ELITE STATUS! You're now among the chosen ones!",
+            "💎 DIAMOND TIER! Your hands are getting harder!"
         ]
         
         self.fud_events = [
@@ -84,7 +131,17 @@ class CryptoClashBot:
                 'og_status': False,
                 'total_predictions': 0,
                 'wins': 0,
-                'referrals': 0
+                'referrals': 0,
+                'level': 1,
+                'xp': 0,
+                'achievements': [],
+                'daily_challenges_completed': 0,
+                'streak_shields': 0,
+                'double_xp_remaining': 0,
+                'lucky_charms': 0,
+                'whale_uses': 0,
+                'perfect_streak': 0,  # For daily challenges
+                'last_challenge_reset': 0
             }
         return self.player_data[user_id]
 
@@ -188,7 +245,7 @@ class CryptoClashBot:
         return None
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start command - welcome new players"""
+        """Start command - welcome new players with enhanced gamification"""
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         username = update.effective_user.username or "anon"
@@ -198,46 +255,94 @@ class CryptoClashBot:
         player_data = self.get_player_data(user_id)
         group_data = self.get_group_data(chat_id)
         
+        # Generate daily challenge
+        self.generate_daily_challenge(user_id)
+        
         # Check for OG status (first 10 players in group)
         if not player_data['og_status'] and group_data['og_count'] < 10:
             player_data['og_status'] = True
             group_data['og_count'] += 1
-            og_msg = "👑 Congratulations! You're now an OG in this group!"
+            og_msg = "👑 <b>OG STATUS UNLOCKED!</b> You're among the first 10 legends!"
             logger.info(f"User {user_id} got OG status in chat {chat_id}")
         else:
             og_msg = ""
         
         group_data['total_players'] = len(set(list(group_data['leaderboard'].keys()) + [user_id]))
         
+        # Calculate level progression
+        current_level = player_data['level']
+        next_level_xp = self.get_xp_for_next_level(current_level)
+        xp_progress = player_data['xp']
+        
+        if next_level_xp > 0:
+            current_level_xp = self.level_requirements[current_level]
+            xp_for_next = next_level_xp - xp_progress
+            progress_bar = "█" * int((xp_progress - current_level_xp) / (next_level_xp - current_level_xp) * 10)
+            progress_bar += "░" * (10 - len(progress_bar))
+            level_display = f"Level {current_level} ⚡ [{progress_bar}] ({xp_for_next} XP to Lv.{current_level + 1})"
+        else:
+            level_display = f"Level {current_level} ⚡ [██████████] (MAX LEVEL!)"
+        
+        # Daily challenge info
+        daily_challenge = ""
+        if user_id in self.daily_challenges:
+            challenge = self.daily_challenges[user_id]
+            if not challenge['completed']:
+                progress = f"{challenge['progress']}/{challenge['target']}"
+                daily_challenge = f"🎯 <b>Daily Quest:</b> {challenge['desc']} ({progress}) - {challenge['reward']} tokens"
+            else:
+                daily_challenge = "✅ <b>Daily Quest:</b> Completed! New challenge tomorrow!"
+        
+        # Recent achievements
+        achievement_display = ""
+        if player_data['achievements']:
+            latest_achievements = player_data['achievements'][-3:]  # Show last 3
+            achievement_emojis = [self.achievements[ach]['name'].split()[0] for ach in latest_achievements]
+            achievement_display = f"🏆 <b>Recent Badges:</b> {' '.join(achievement_emojis)}"
+        
+        # Special status indicators
+        status_indicators = []
+        if player_data['double_xp_remaining'] > 0:
+            status_indicators.append(f"⭐ Double XP ({player_data['double_xp_remaining']} left)")
+        if player_data['streak_shields'] > 0:
+            status_indicators.append(f"🛡️ Streak Shield ({player_data['streak_shields']})")
+        if player_data['lucky_charms'] > 0:
+            status_indicators.append(f"🍀 Lucky Charm ({player_data['lucky_charms']})")
+        
+        status_text = "\n" + "\n".join([f"• {status}" for status in status_indicators]) if status_indicators else ""
+        
         welcome_msg = f"""
 🎮 <b>CRYPTO CLASH</b> 🎮
-GM {username}! Ready to prove your diamond hands? 💎
+GM {username}! Ready to dominate the markets? 💎
 
-🎯 <b>How to Play:</b>
-• Predict if crypto goes UP ⬆️ or DOWN ⬇️ in 60 seconds
-• Need 1%+ move to win
-• Build streaks for multipliers! 
-• Earn Shard Tokens 💎
+⚡ <b>{level_display}</b>
 
-💰 <b>Your Stats:</b>
-• Shard Tokens: {player_data['shard_tokens']} 💎
-• Best Streak: {player_data['best_streak']} 🔥
+🎯 <b>Game Stats:</b>
+• Shard Tokens: {player_data['shard_tokens']:,} 💎
+• Win Streak: {player_data['streak']} 🔥 (Best: {player_data['best_streak']})
 • Whale Power-ups: {player_data['whale_powerups']} 🐋
+• Achievements: {len(player_data['achievements'])}/7 🏆
+
+{achievement_display}
+
+{daily_challenge}
 
 {og_msg}
 
-🚀 <b>Commands:</b>
-• /predict - Start new prediction
-• /results - Check prediction history  
-• /check - Manual result check (if needed)
-• /leaderboard - See group rankings
-• /test_api - Test API connection
+{status_text}
 
-WAGMI! 🚀
+🚀 <b>Quick Commands:</b>
+• /predict - Start epic prediction
+• /profile - Detailed stats & achievements  
+• /shop - Power-up marketplace
+• /daily - Check daily quest
+• /leaderboard - Hall of legends
+
+<i>LFG! Time to make some alpha moves! 🚀</i>
         """
         
         try:
-            await update.message.reply_text(welcome_msg, parse_mode='HTML')
+            await update.message.reply_text(welcome_msg.strip(), parse_mode='HTML')
             logger.info(f"✅ Successfully sent welcome message to user {user_id}")
         except Exception as e:
             logger.error(f"❌ Failed to send welcome message to user {user_id}: {e}")
@@ -555,6 +660,7 @@ Use /results to check this prediction anytime!
         if won:
             player_data['wins'] += 1
             player_data['streak'] += 1
+            player_data['perfect_streak'] += 1
             if player_data['streak'] > player_data['best_streak']:
                 player_data['best_streak'] = player_data['streak']
             
@@ -563,59 +669,110 @@ Use /results to check this prediction anytime!
             total_reward = int(base_reward * whale_multiplier * streak_multiplier)
             player_data['shard_tokens'] += total_reward
             
+            # Award XP (base 50 XP for wins)
+            base_xp = 50 + (player_data['streak'] * 5)  # Bonus XP for streaks
+            xp_result = self.award_xp(user_id, base_xp)
+            
+            # Update daily challenges
+            self.update_daily_challenge(user_id, 'predictions')
+            self.update_daily_challenge(user_id, 'win_streak', player_data['streak'])
+            if whale_multiplier > 1:
+                self.update_daily_challenge(user_id, 'whale_mode')
+                player_data['whale_uses'] += 1
+            
+            # Check for new achievements
+            new_achievements = self.check_achievements(user_id)
+            
             response = random.choice(self.win_responses)
+            
+            # Build result message with gamification
             result_msg = f"""
-🎉 **PREDICTION WON!** 🎉
+🎉 <b>PREDICTION WON!</b> 🎉
 
 {response}
 
-📊 **Results:**
+📊 <b>Results:</b>
 💰 {self.crypto_display[prediction['crypto']]}: ${start_price:.4f} → ${final_price:.4f}
 📈 Change: {price_change_pct:+.2f}%
 🎯 Needed: {'+' if direction == 'up' else '-'}{required_change}%
 
-💎 **Rewards:**
+💎 <b>Rewards:</b>
 • Shard Tokens: +{total_reward} 💎
+• XP Gained: +{xp_result['awarded_xp']} ⚡{'🔥' if xp_result['double_xp_active'] else ''}
 • Streak: {player_data['streak']} 🔥
 {'• Whale Bonus: 3x 🐋' if whale_multiplier > 1 else ''}
 
-💰 Total Tokens: {player_data['shard_tokens']} 💎
-
-Use /predict for another round! 🚀
+💰 Total: {player_data['shard_tokens']:,} tokens | Level {xp_result['new_level']}
             """
+            
+            # Add level up notification
+            if xp_result['level_up']:
+                level_msg = random.choice(self.level_up_messages)
+                result_msg += f"\n\n🎊 <b>{level_msg}</b>\n⚡ Welcome to Level {xp_result['new_level']}!"
+            
+            # Add achievement notifications
+            if new_achievements:
+                for ach_id in new_achievements:
+                    ach = self.achievements[ach_id]
+                    result_msg += f"\n\n🏆 <b>ACHIEVEMENT UNLOCKED!</b>\n{ach['name']} - {ach['desc']}\nReward: +{ach['reward']} tokens!"
+            
+            result_msg += "\n\nUse /predict for another round! 🚀"
             
             # Store result
             prediction['result'] = 'won'
             prediction['final_price'] = final_price
             prediction['price_change_pct'] = price_change_pct
             prediction['tokens_earned'] = total_reward
+            prediction['xp_earned'] = xp_result['awarded_xp']
             
             # Update group leaderboard
             group_data = self.get_group_data(prediction['chat_id'])
             group_data['leaderboard'][user_id] = player_data['best_streak']
             
-            # Check for new leaderboard record
+            # Check for streak announcements (every 5 wins)
             if player_data['streak'] >= 5 and player_data['streak'] % 5 == 0:
                 await self.announce_achievement(context, prediction['chat_id'], user_id, player_data['streak'])
                 
-            logger.info(f"Prediction {prediction_id} WON - User {user_id} earned {total_reward} tokens, streak: {player_data['streak']}")
+            logger.info(f"Prediction {prediction_id} WON - User {user_id} earned {total_reward} tokens, {xp_result['awarded_xp']} XP, streak: {player_data['streak']}")
                 
         else:
+            # Handle loss with streak shield protection
             previous_streak = player_data['streak']
-            player_data['streak'] = 0
+            streak_protected = False
+            
+            if player_data['streak_shields'] > 0:
+                player_data['streak_shields'] -= 1
+                streak_protected = True
+                protection_msg = "🛡️ <b>STREAK SHIELD ACTIVATED!</b> Your streak is protected!"
+            else:
+                player_data['streak'] = 0
+                player_data['perfect_streak'] = 0
+                protection_msg = ""
+            
+            # Still update daily challenges for attempts
+            self.update_daily_challenge(user_id, 'predictions')
+            if whale_multiplier > 1:
+                player_data['whale_uses'] += 1
+            
+            # Award small XP for participation
+            xp_result = self.award_xp(user_id, 10)
+            
             response = random.choice(self.lose_responses)
             result_msg = f"""
-💸 **PREDICTION LOST** 💸
+💸 <b>PREDICTION LOST</b> 💸
 
 {response}
 
-📊 **Results:**
+📊 <b>Results:</b>
 💰 {self.crypto_display[prediction['crypto']]}: ${start_price:.4f} → ${final_price:.4f}
 📉 Change: {price_change_pct:+.2f}%
 🎯 Needed: {'+' if direction == 'up' else '-'}{required_change}%
 
-💔 Streak reset to 0
-💎 Tokens: {player_data['shard_tokens']} 💎
+{protection_msg}
+
+⚡ XP: +{xp_result['awarded_xp']} (participation bonus)
+{'💔 Streak reset to 0' if not streak_protected else f'🔥 Streak preserved: {player_data["streak"]}'}
+💎 Tokens: {player_data['shard_tokens']:,} 💎
 
 Better luck next time! Use /predict to try again! 🍀
             """
@@ -625,8 +782,10 @@ Better luck next time! Use /predict to try again! 🍀
             prediction['final_price'] = final_price
             prediction['price_change_pct'] = price_change_pct
             prediction['previous_streak'] = previous_streak
+            prediction['streak_protected'] = streak_protected
+            prediction['xp_earned'] = xp_result['awarded_xp']
             
-            logger.info(f"Prediction {prediction_id} LOST - User {user_id} lost streak of {previous_streak}")
+            logger.info(f"Prediction {prediction_id} LOST - User {user_id} lost streak of {previous_streak} (protected: {streak_protected})")
         
         # Send result with error handling
         try:
@@ -776,12 +935,14 @@ Better luck next time! Use /predict to try again! 🍀
         await update.message.reply_text(leaderboard_text, parse_mode='Markdown')
 
     async def challenge_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start group vs group challenge"""
+        """Group vs group battles (enhanced)"""
         await update.message.reply_text(
-            "🔥 **GROUP BATTLES COMING SOON!** 🔥\n\n"
-            "Soon you'll be able to challenge other Telegram groups!\n"
-            "For now, focus on dominating your local leaderboard! 💪\n\n"
-            "Use /predict to keep building your streak! 🚀"
+            "⚔️ <b>GUILD WARS COMING SOON!</b> ⚔️\n\n"
+            "🔥 Epic group vs group tournaments\n"
+            "🏆 Massive rewards for winning guilds\n"
+            "👑 Crown the ultimate trading guild\n\n"
+            "Stay tuned for the ultimate crypto clash! 🚀",
+            parse_mode='HTML'
         )
 
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -830,116 +991,13 @@ Keep grinding anon! WAGMI! 🚀
         player_data['last_airdrop'] = time.time()
         
         await update.message.reply_text(
-            f"🪂 **DAILY AIRDROP** 🪂\n\n"
+            f"🪂 <b>DAILY AIRDROP</b> 🪂\n\n"
             f"GM anon! You received {airdrop_amount} Shard Tokens! 💎\n\n"
-            f"💰 Total: {player_data['shard_tokens']} tokens\n\n"
+            f"💰 Total: {player_data['shard_tokens']:,} tokens\n\n"
             f"📢 Share this bot with friends for bonus airdrops!\n"
-            f"http://t.me/CryptoClash12_Bot"
+            f"http://t.me/CryptoClash12_Bot",
+            parse_mode='HTML'
         )
-
-    async def api_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show API status and features"""
-        api_key = os.getenv('COINGECKO_API_KEY')
-        
-        if api_key:
-            # Test Pro API connection
-            try:
-                test_price = await self.get_crypto_price('bitcoin')
-                if test_price:
-                    status_msg = f"""
-🔥 **PRO API ACTIVE** 🔥
-
-✅ **CoinGecko Pro Features:**
-• Higher precision pricing (6 decimal places)
-• Faster response times (< 500ms)
-• 10,000 requests/month limit
-• More reliable real-time data
-• Priority support
-
-💰 **Test Price:** BTC = ${test_price:,.6f}
-
-🚀 **Performance Benefits:**
-• Predictions are more accurate
-• Less API failures
-• Better user experience
-• Shorter retry timeouts
-
-Pro API Status: OPERATIONAL ✅
-                    """
-                else:
-                    status_msg = "⚠️ Pro API key found but connection failed. Check your key!"
-            except Exception as e:
-                status_msg = f"❌ Pro API error: {str(e)}"
-        else:
-            status_msg = f"""
-🆓 **FREE API MODE** 
-
-ℹ️ **Current Features:**
-• Basic price data
-• 10-30 requests/minute limit
-• Standard response times
-• Good for testing
-
-💡 **Upgrade to Pro API:**
-• Add COINGECKO_API_KEY to environment
-• Get higher rate limits
-• Better reliability for predictions
-• More precise pricing
-
-API Status: FREE TIER ⚡
-            """
-        
-        await update.message.reply_text(status_msg, parse_mode='Markdown')
-
-    async def test_api_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Test CoinGecko API connection"""
-        await update.message.reply_text("🔍 Testing API connection... Please wait!")
-        
-        api_key = os.getenv('COINGECKO_API_KEY')
-        tier = "Pro" if api_key else "Free"
-        
-        try:
-            # Test with Bitcoin price
-            start_time = time.time()
-            price = await self.get_crypto_price('bitcoin')
-            response_time = (time.time() - start_time) * 1000  # Convert to ms
-            
-            if price:
-                status_msg = f"""
-✅ **API TEST SUCCESSFUL** ✅
-
-🔧 **Connection Details:**
-• Tier: {tier} API
-• Response Time: {response_time:.0f}ms
-• Test Price: BTC = ${price:,.2f}
-
-📊 **Rate Limiting:**
-• Cooldown: {45 if not api_key else 30}s between predictions
-• Cache Duration: {self.cache_duration}s
-• Min API Interval: {self.min_api_interval}s
-
-🚀 **Status:** Ready for predictions!
-
-Use /predict to start playing! 🎯
-                """
-            else:
-                status_msg = f"""
-❌ **API TEST FAILED** ❌
-
-🔧 **Issue:** Unable to fetch price data
-💡 **Solutions:**
-• Wait a few minutes and try again
-• Check internet connection
-• API might be temporarily down
-
-📊 **Current Tier:** {tier}
-
-Try /test_api again in a few minutes! ⏰
-                """
-        except Exception as e:
-            status_msg = f"❌ **API ERROR:** {str(e)}\n\nTry again in a few minutes! 🙏"
-        
-        await update.message.reply_text(status_msg, parse_mode='Markdown')
 
     async def check_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Manually check prediction results (when JobQueue fails)"""
@@ -979,30 +1037,6 @@ Try /test_api again in a few minutes! ⏰
         else:
             await update.message.reply_text("📊 No pending predictions to check. Use /results to see your history!")
 
-    async def test_timer_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Test if JobQueue/timer is working"""
-        if context.job_queue is None:
-            await update.message.reply_text(
-                "❌ **TIMER NOT WORKING** ❌\n\n"
-                "JobQueue is not set up properly.\n"
-                "Predictions won't auto-complete.\n\n"
-                "💡 **Solutions:**\n"
-                "• Use /check to manually check results\n"
-                "• Use /results to see prediction history\n"
-                "• Contact admin to fix JobQueue"
-            )
-        else:
-            await update.message.reply_text("✅ Timer system is working! Predictions will auto-complete in 60s.")
-
-    async def debug_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Debug handler to log all received messages"""
-        if update.message:
-            user_id = update.effective_user.id
-            username = update.effective_user.username or "anon"
-            text = update.message.text or "<non-text>"
-            chat_id = update.effective_chat.id
-            logger.info(f"🔍 DEBUG: Received message from {user_id} ({username}) in chat {chat_id}: '{text}'")
-
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """Log the error and gracefully shut down on conflict."""
         if isinstance(context.error, telegram.error.Conflict):
@@ -1011,6 +1045,233 @@ Try /test_api again in a few minutes! ⏰
             os.kill(os.getpid(), signal.SIGINT)
         else:
             logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+
+    def calculate_level(self, xp: int) -> int:
+        """Calculate player level based on XP"""
+        for level in sorted(self.level_requirements.keys(), reverse=True):
+            if xp >= self.level_requirements[level]:
+                return level
+        return 1
+
+    def get_xp_for_next_level(self, current_level: int) -> int:
+        """Get XP required for next level"""
+        if current_level >= max(self.level_requirements.keys()):
+            return 0
+        return self.level_requirements[current_level + 1]
+
+    def award_xp(self, user_id: int, base_xp: int) -> Dict:
+        """Award XP and check for level up"""
+        player_data = self.get_player_data(user_id)
+        
+        # Apply double XP if active
+        multiplier = 2 if player_data['double_xp_remaining'] > 0 else 1
+        awarded_xp = base_xp * multiplier
+        
+        if multiplier == 2:
+            player_data['double_xp_remaining'] -= 1
+        
+        old_level = player_data['level']
+        player_data['xp'] += awarded_xp
+        new_level = self.calculate_level(player_data['xp'])
+        player_data['level'] = new_level
+        
+        return {
+            'awarded_xp': awarded_xp,
+            'total_xp': player_data['xp'],
+            'old_level': old_level,
+            'new_level': new_level,
+            'level_up': new_level > old_level,
+            'double_xp_active': multiplier == 2
+        }
+
+    def check_achievements(self, user_id: int) -> List[str]:
+        """Check and award new achievements"""
+        player_data = self.get_player_data(user_id)
+        new_achievements = []
+        
+        achievements_to_check = {
+            'first_win': player_data['wins'] >= 1,
+            'streak_5': player_data['best_streak'] >= 5,
+            'streak_10': player_data['best_streak'] >= 10,
+            'whale_user': player_data['whale_uses'] >= 10,
+            'high_roller': player_data['shard_tokens'] >= 10000,
+            'prophet': player_data['wins'] >= 100,
+            'daily_warrior': player_data['daily_challenges_completed'] >= 7
+        }
+        
+        for achievement_id, condition in achievements_to_check.items():
+            if condition and achievement_id not in player_data['achievements']:
+                player_data['achievements'].append(achievement_id)
+                player_data['shard_tokens'] += self.achievements[achievement_id]['reward']
+                new_achievements.append(achievement_id)
+        
+        return new_achievements
+
+    def generate_daily_challenge(self, user_id: int):
+        """Generate a new daily challenge for the user"""
+        import random
+        current_time = time.time()
+        player_data = self.get_player_data(user_id)
+        
+        # Reset daily if 24 hours passed
+        if current_time - player_data['last_challenge_reset'] > 86400:
+            challenge = random.choice(self.challenge_types)
+            self.daily_challenges[user_id] = {
+                'type': challenge['type'],
+                'desc': challenge['desc'],
+                'progress': 0,
+                'target': challenge['target'],
+                'reward': challenge['reward'],
+                'completed': False
+            }
+            player_data['last_challenge_reset'] = current_time
+            player_data['perfect_streak'] = 0  # Reset perfect streak
+
+    def update_daily_challenge(self, user_id: int, action: str, value: int = 1) -> bool:
+        """Update daily challenge progress and return if completed"""
+        if user_id not in self.daily_challenges:
+            return False
+        
+        challenge = self.daily_challenges[user_id]
+        if challenge['completed']:
+            return False
+        
+        if challenge['type'] == action:
+            challenge['progress'] += value
+            if challenge['progress'] >= challenge['target']:
+                challenge['completed'] = True
+                player_data = self.get_player_data(user_id)
+                player_data['shard_tokens'] += challenge['reward']
+                player_data['daily_challenges_completed'] += 1
+                return True
+        
+        return False
+
+    async def profile_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show detailed player profile with achievements and stats"""
+        user_id = update.effective_user.id
+        player_data = self.get_player_data(user_id)
+        username = update.effective_user.username or "anon"
+        
+        # Calculate advanced stats
+        win_rate = (player_data['wins'] / player_data['total_predictions'] * 100) if player_data['total_predictions'] > 0 else 0
+        level_progress = self.get_xp_for_next_level(player_data['level'])
+        
+        # Achievement showcase
+        achievement_text = "🏆 <b>Achievement Showcase:</b>\n"
+        if player_data['achievements']:
+            for ach_id in player_data['achievements']:
+                ach = self.achievements[ach_id]
+                achievement_text += f"• {ach['name']} - {ach['desc']}\n"
+        else:
+            achievement_text += "• No achievements yet - start predicting to unlock badges!\n"
+        
+        # Rank calculation (simplified)
+        all_players = list(self.player_data.keys())
+        rank = sorted(all_players, key=lambda x: self.player_data[x]['xp'], reverse=True).index(user_id) + 1
+        
+        profile_msg = f"""
+👤 <b>{username}'s TRADING PROFILE</b> {'👑' if player_data['og_status'] else ''} 
+
+⚡ <b>Level {player_data['level']}</b> | {player_data['xp']:,} XP
+🏆 Global Rank: #{rank}
+
+📊 <b>Performance Metrics:</b>
+• Total Predictions: {player_data['total_predictions']}
+• Wins: {player_data['wins']} | Win Rate: {win_rate:.1f}%
+• Current Streak: {player_data['streak']} 🔥
+• Best Streak: {player_data['best_streak']} 🏆
+• Whale Mode Uses: {player_data['whale_uses']} 🐋
+
+💎 <b>Wealth & Assets:</b>
+• Shard Tokens: {player_data['shard_tokens']}💎
+• Power-ups Owned: {player_data['whale_powerups']} 🐋
+• Active Buffs: {sum([player_data['streak_shields'], player_data['double_xp_remaining'], player_data['lucky_charms']])}
+
+{achievement_text}
+
+📈 <b>Daily Progress:</b>
+• Challenges Completed: {player_data['daily_challenges_completed']} ⚔️
+• Perfect Prediction Streak: {player_data['perfect_streak']} ✨
+
+<i>Keep grinding to unlock new achievements! 🚀</i>
+        """
+        
+        await update.message.reply_text(profile_msg.strip(), parse_mode='HTML')
+
+    async def shop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Power-up marketplace"""
+        user_id = update.effective_user.id
+        player_data = self.get_player_data(user_id)
+        
+        shop_msg = f"""
+🛒 <b>POWER-UP MARKETPLACE</b> 🛒
+
+💰 Your Balance: {player_data['shard_tokens']:,} tokens 💎
+
+🛍️ <b>Available Power-ups:</b>
+
+🐋 <b>Whale Mode</b> - 500 tokens
+• 3x reward multiplier for next prediction
+• Current stock: ∞
+
+🛡️ <b>Streak Shield</b> - 1,000 tokens  
+• Protects your streak from one loss
+• Current stock: ∞
+
+⭐ <b>Double XP Boost</b> - 300 tokens
+• 2x XP for next 5 predictions  
+• Current stock: ∞
+
+🍀 <b>Lucky Charm</b> - 800 tokens
+• Reduces required move to 0.5% for next prediction
+• Current stock: ∞
+
+<b>How to Buy:</b>
+Reply with the power-up name to purchase!
+Example: "Whale Mode" or "Lucky Charm"
+
+<i>Invest wisely to dominate the markets! 📈</i>
+        """
+        
+        await update.message.reply_text(shop_msg.strip(), parse_mode='HTML')
+
+    async def daily_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show daily challenge status"""
+        user_id = update.effective_user.id
+        self.generate_daily_challenge(user_id)  # Ensure challenge exists
+        
+        if user_id not in self.daily_challenges:
+            await update.message.reply_text("🎯 No daily challenge available. Try again tomorrow!")
+            return
+        
+        challenge = self.daily_challenges[user_id]
+        progress_bar = "█" * int((challenge['progress'] / challenge['target']) * 10)
+        progress_bar += "░" * (10 - len(progress_bar))
+        
+        if challenge['completed']:
+            status = "✅ <b>COMPLETED!</b> Reward claimed!"
+            time_left = "New challenge in: Tomorrow!"
+        else:
+            status = f"🎯 <b>IN PROGRESS</b> [{progress_bar}] {challenge['progress']}/{challenge['target']}"
+            hours_left = 24 - int((time.time() - self.get_player_data(user_id)['last_challenge_reset']) / 3600)
+            time_left = f"Time remaining: {max(0, hours_left)} hours"
+        
+        daily_msg = f"""
+⚔️ <b>DAILY CHALLENGE</b> ⚔️
+
+🎯 <b>Today's Quest:</b>
+{challenge['desc']}
+
+{status}
+
+💎 <b>Reward:</b> {challenge['reward']} Shard Tokens
+⏰ <b>{time_left}</b>
+
+<i>Complete daily challenges to unlock the Daily Warrior achievement! 🏆</i>
+        """
+        
+        await update.message.reply_text(daily_msg.strip(), parse_mode='HTML')
 
     def run(self):
         """Start the bot"""
@@ -1031,18 +1292,15 @@ Try /test_api again in a few minutes! ⏰
             app.add_handler(CommandHandler("start", self.start_command))
             app.add_handler(CommandHandler("predict", self.predict_command))
             app.add_handler(CommandHandler("results", self.results_command))
+            app.add_handler(CommandHandler("profile", self.profile_command))
+            app.add_handler(CommandHandler("shop", self.shop_command))
+            app.add_handler(CommandHandler("daily", self.daily_command))
             app.add_handler(CommandHandler("leaderboard", self.leaderboard_command))
             app.add_handler(CommandHandler("challenge", self.challenge_command))
             app.add_handler(CommandHandler("stats", self.stats_command))
             app.add_handler(CommandHandler("airdrop", self.airdrop_command))
-            app.add_handler(CommandHandler("api_status", self.api_status_command))
-            app.add_handler(CommandHandler("test_api", self.test_api_command))
             app.add_handler(CommandHandler("check", self.check_command))
-            app.add_handler(CommandHandler("test_timer", self.test_timer_command))
             app.add_handler(CallbackQueryHandler(self.prediction_callback))
-            
-            # Add debug handler to catch all messages (put this last)
-            app.add_handler(MessageHandler(filters.ALL, self.debug_message_handler))
             
             logger.info("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
             logger.info(f"✅ JobQueue enabled: {app.job_queue is not None}")
