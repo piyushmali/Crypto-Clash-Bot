@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import signal
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -989,11 +990,23 @@ Try /test_api again in a few minutes! ⏰
         else:
             await update.message.reply_text("✅ Timer system is working! Predictions will auto-complete in 60s.")
 
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        """Log the error and gracefully shut down on conflict."""
+        if isinstance(context.error, telegram.error.Conflict):
+            logger.critical("CONFLICT ERROR: Another bot instance is running. Shutting down this instance.")
+            # Emulate Ctrl+C to trigger graceful shutdown
+            os.kill(os.getpid(), signal.SIGINT)
+        else:
+            logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+
     def run(self):
         """Start the bot"""
         try:
             # Build application with JobQueue enabled
             app = Application.builder().token(self.token).build()
+            
+            # Add the custom error handler to manage conflicts
+            app.add_error_handler(self.error_handler)
             
             # Verify JobQueue is available
             if app.job_queue is None:
@@ -1027,6 +1040,8 @@ Try /test_api again in a few minutes! ⏰
                 allowed_updates=Update.ALL_TYPES  # Handle all update types
             )
             
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Bot shutting down gracefully due to signal.")
         except Exception as e:
             logger.error(f"Failed to start bot: {e}")
             print(f"❌ Bot startup failed: {e}")
