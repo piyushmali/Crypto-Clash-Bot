@@ -209,23 +209,23 @@ class CryptoClashBot:
         group_data['total_players'] = len(set(list(group_data['leaderboard'].keys()) + [user_id]))
         
         welcome_msg = f"""
-🎮 **CRYPTO CLASH** 🎮
+🎮 <b>CRYPTO CLASH</b> 🎮
 GM {username}! Ready to prove your diamond hands? 💎
 
-🎯 **How to Play:**
+🎯 <b>How to Play:</b>
 • Predict if crypto goes UP ⬆️ or DOWN ⬇️ in 60 seconds
 • Need 1%+ move to win
 • Build streaks for multipliers! 
 • Earn Shard Tokens 💎
 
-💰 **Your Stats:**
+💰 <b>Your Stats:</b>
 • Shard Tokens: {player_data['shard_tokens']} 💎
 • Best Streak: {player_data['best_streak']} 🔥
 • Whale Power-ups: {player_data['whale_powerups']} 🐋
 
 {og_msg}
 
-🚀 **Commands:**
+🚀 <b>Commands:</b>
 • /predict - Start new prediction
 • /results - Check prediction history  
 • /check - Manual result check (if needed)
@@ -235,7 +235,7 @@ GM {username}! Ready to prove your diamond hands? 💎
 WAGMI! 🚀
         """
         
-        await update.message.reply_text(welcome_msg, parse_mode='Markdown')
+        await update.message.reply_text(welcome_msg, parse_mode='HTML')
 
     async def predict_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start a new prediction"""
@@ -318,10 +318,10 @@ WAGMI! 🚀
         og_emoji = "👑" if player_data['og_status'] else ""
         
         predict_msg = f"""
-🎯 **PREDICTION TIME** {og_emoji}
+🎯 <b>PREDICTION TIME</b> {og_emoji}
 
-💰 **{crypto_name}** | ${current_price:.4f}
-⏰ **60 seconds** to predict 1%+ move!
+💰 <b>{crypto_name}</b> | ${current_price:.4f}
+⏰ <b>60 seconds</b> to predict 1%+ move!
 
 💎 Shard Tokens: {player_data['shard_tokens']}{streak_bonus}
 🐋 Whale Power-ups: {player_data['whale_powerups']}
@@ -331,7 +331,7 @@ WAGMI! 🚀
 Make your prediction! ⬇️
         """
         
-        msg = await update.message.reply_text(predict_msg, reply_markup=reply_markup, parse_mode='Markdown')
+        msg = await update.message.reply_text(predict_msg, reply_markup=reply_markup, parse_mode='HTML')
         
         # Schedule result check in 60 seconds with better error handling
         try:
@@ -402,7 +402,7 @@ Make your prediction! ⬇️
             logger.info(f"Locked prediction {prediction_id}: {direction} on {crypto_name}")
             
             locked_msg = f"""
-✅ **PREDICTION LOCKED** ✅
+✅ <b>PREDICTION LOCKED</b> ✅
 
 💰 {crypto_name} {direction_emoji} {direction.upper()}
 💵 Entry: ${prediction['start_price']:.4f}
@@ -414,7 +414,7 @@ Make your prediction! ⬇️
 Use /results to check this prediction anytime!
             """
             
-            await query.edit_message_text(locked_msg, parse_mode='Markdown')
+            await query.edit_message_text(locked_msg, parse_mode='HTML')
             
         elif data.startswith('whale_'):
             prediction_id = data[6:]  # Remove 'whale_' prefix
@@ -460,13 +460,13 @@ Use /results to check this prediction anytime!
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"🐋 **WHALE MODE ACTIVATED** 🐋\n\n"
+            f"🐋 <b>WHALE MODE ACTIVATED</b> 🐋\n\n"
             f"💰 {crypto_name} | ${prediction['start_price']:.4f}\n"
-            f"⚡ **3x MULTIPLIER ACTIVE**\n"
+            f"⚡ <b>3x MULTIPLIER ACTIVE</b>\n"
             f"🎯 Pick your direction for massive gains!\n\n"
             f"🐋 Remaining Power-ups: {player_data['whale_powerups']}",
             reply_markup=reply_markup,
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
 
     async def check_prediction_result(self, context: ContextTypes.DEFAULT_TYPE):
@@ -493,8 +493,8 @@ Use /results to check this prediction anytime!
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text="⏰ **TIME'S UP!**\n\n🚫 No prediction made - you missed out anon!\n\nUse /predict to try again! 🚀",
-                    parse_mode='Markdown'
+                    text="⏰ <b>TIME'S UP!</b>\n\n🚫 No prediction made - you missed out anon!\n\nUse /predict to try again! 🚀",
+                    parse_mode='HTML'
                 )
                 logger.info(f"Prediction {prediction_id} expired with no direction selected")
             except Exception as e:
@@ -511,8 +511,8 @@ Use /results to check this prediction anytime!
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text="🔧 **ERROR**\n\nPrice oracle failed - prediction cancelled!\nYour tokens and streak are safe! 💎\n\nUse /predict to try again!",
-                    parse_mode='Markdown'
+                    text="🔧 <b>ERROR</b>\n\nPrice oracle failed - prediction cancelled!\nYour tokens and streak are safe! 💎\n\nUse /predict to try again!",
+                    parse_mode='HTML'
                 )
                 logger.error(f"Failed to get final price for prediction {prediction_id}")
             except Exception as e:
@@ -631,7 +631,7 @@ Better luck next time! Use /predict to try again! 🍀
                     chat_id=chat_id,
                     message_id=message_id,
                     text=result_msg,
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
                 logger.info(f"Successfully sent result for prediction {prediction_id}")
             else:
@@ -639,7 +639,7 @@ Better luck next time! Use /predict to try again! 🍀
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"🎯 **PREDICTION RESULT**\n\n{result_msg}",
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
                 logger.info(f"Sent new result message for prediction {prediction_id}")
         except Exception as e:
@@ -649,7 +649,7 @@ Better luck next time! Use /predict to try again! 🍀
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"🎯 **PREDICTION RESULT**\n\n{result_msg}",
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
             except Exception as e2:
                 logger.error(f"Failed to send new result message: {e2}")
@@ -709,7 +709,7 @@ Better luck next time! Use /predict to try again! 🍀
         
         results_text += "\nUse /predict to make a new prediction! 🎯"
         
-        await update.message.reply_text(results_text, parse_mode='Markdown')
+        await update.message.reply_text(results_text, parse_mode='HTML')
 
     async def announce_achievement(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, streak: int):
         """Announce when someone achieves a milestone"""
