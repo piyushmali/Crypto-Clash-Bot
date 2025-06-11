@@ -1020,10 +1020,11 @@ Try /test_api again in a few minutes! ⏰
             print("🚀 Crypto Clash Bot starting up! WAGMI! 🚀")
             print(f"✅ JobQueue enabled: {app.job_queue is not None}")
             
-            # Run with better error handling
+            # Run with better error handling and conflict resolution
             app.run_polling(
                 drop_pending_updates=True,  # Clear any pending updates
-                close_loop=False
+                close_loop=False,
+                allowed_updates=Update.ALL_TYPES  # Handle all update types
             )
             
         except Exception as e:
@@ -1036,6 +1037,7 @@ Try /test_api again in a few minutes! ⏰
                 print("• Stop all other instances of this bot")
                 print("• Wait 30 seconds and try again")
                 print("• Make sure only ONE instance runs at a time")
+                print("• On Render: Restart your deployment")
             elif "Unauthorized" in str(e):
                 print("\n💡 SOLUTION: Bot token issue!")
                 print("• Check your TELEGRAM_BOT_TOKEN in .env")
